@@ -17,3 +17,19 @@ It allows you to edit `.bxml`, `.database`, and `.level` files and rebuild them.
 + Property Editor
 + Edit Raw XML
 + Save XML
+
+## Quick Start
+
+### 1. Open the file
+<img width="946" height="533" alt="image" src="https://github.com/user-attachments/assets/90781738-5f4a-4a3e-ba1e-7b1d52d3cd91" />
+
+### 2. Edit and Press Enter
+<img width="1051" height="693" alt="image" src="https://github.com/user-attachments/assets/b0da59a8-b8de-4352-9a65-0575fdad5995" />
+
+**Note:** Or edit the XML directly and click `Apply XML` to apply the changes.
+
+### 3. Build
+<img width="946" height="533" alt="image" src="https://github.com/user-attachments/assets/5513887f-1967-47d6-bc37-4b15f14c13f7" />
+
+### 4. Result
+<img width="1590" height="457" alt="result" src="https://github.com/user-attachments/assets/8962a379-6601-4cc3-ae35-d6ab2ff1af18" />
