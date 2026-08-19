@@ -5,3 +5,15 @@
 [![License](https://img.shields.io/github/license/daniilkorochansky/reflex-bxml-editor)](https://github.com/daniilkorochansky/reflex-bxml-editor/blob/main/LICENSE)
 
 # Reflex BXML Editor
+<img width="1021" height="693" alt="image" src="https://github.com/user-attachments/assets/dd014815-20dc-4b58-b6c2-4e5eccae54ef" />
+
+Game file editor (MX vs ATV: Reflex) with a BXML structure `except for savegame.bxml`
+
+It allows you to edit `.bxml`, `.database`, and `.level` files and rebuild them.
+
+## Features
++ Edit `.bxml`, `.database`, and `.level` files.
++ Rebuild `.bxml`, `.database`, and `.level` files.
++ Property Editor
++ Edit Raw XML
++ Save XML
