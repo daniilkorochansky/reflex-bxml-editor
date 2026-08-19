@@ -891,7 +891,7 @@ class MainFrame(wx.Frame):
     def on_about(self, evt):
         wx.MessageBox(
             "Reflex BXML Editor\n\n"
-            "An editor for game files with a BXML structure.\n\nVersion: 1.1.0\nAuthor: Daniil Korochansky\nLicense: GNU General Public License v3.0",
+            "An editor for game files with a BXML structure.\n\nVersion: 1.2.0\nAuthor: Daniil Korochansky\nLicense: GNU General Public License v3.0",
             "About",
             wx.OK | wx.ICON_INFORMATION
         )

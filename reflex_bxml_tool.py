@@ -79,20 +79,21 @@ class Node:
 @dataclass
 class Parsed:
     header:Header; strings:list[str]; pool:bytes; attrs:list[Attribute]; nodes:list[Node]
-    raw:bytes; compressed:bytes
+    raw:bytes; compressed:bytes; trailer:bytes = b""
 
 
 def parse_header(data:bytes)->Header:
     if len(data)<HEADER.size: raise ValueError('File is smaller than BXML header')
     h=Header(*HEADER.unpack_from(data,0))
     if h.signature != SIG: raise ValueError('Not a BXML file (bad signature)')
-    if len(data) != HEADER.size+h.zsize:
-        raise ValueError(f'Unexpected file size: header says {h.zsize} compressed bytes, file has {len(data)-HEADER.size}')
+    if len(data) < HEADER.size + h.zsize:
+        raise ValueError(f'Truncated BXML: header says {h.zsize} compressed bytes, file has {len(data)-HEADER.size}')
     return h
 
 def decode(path:str)->Parsed:
     data=Path(path).read_bytes(); h=parse_header(data)
-    comp=data[HEADER.size:]
+    comp=data[HEADER.size:HEADER.size+h.zsize]
+    trailer=data[HEADER.size+h.zsize:]
     raw=zlib.decompress(comp)
     expected=h.pool_pointer+h.pool_size+h.attr_count*ATTR.size+h.node_count*NODE.size
     if len(raw)!=expected: raise ValueError(f'Unexpected decompressed size: {len(raw)} != {expected}')
@@ -108,7 +109,7 @@ def decode(path:str)->Parsed:
     attrs=[Attribute(*ATTR.unpack_from(raw,ap+i*ATTR.size)) for i in range(h.attr_count)]
     np=ap+h.attr_count*ATTR.size
     nodes=[Node(*NODE.unpack_from(raw,np+i*NODE.size)) for i in range(h.node_count)]
-    return Parsed(h,strings,pool,attrs,nodes,raw,comp)
+    return Parsed(h,strings,pool,attrs,nodes,raw,comp,trailer)
 
 def pool_read(pool:bytes, typ:int, off:int):
     if off < 0 or off >= len(pool):
@@ -396,7 +397,7 @@ def _encode_xml_fresh(root: ET.Element, version: int, unknown: int) -> bytes:
     return _build_bxml_bytes(strings,pool,attrs,node_objs,version,unknown)
 
 
-def _build_bxml_bytes(strings, pool, attrs, nodes, version, unknown) -> tuple[bytes, bytes]:
+def _build_bxml_bytes(strings, pool, attrs, nodes, version, unknown, trailer: bytes = b'') -> tuple[bytes, bytes]:
     """Build a BXML blob and return (file_bytes, decompressed_raw)."""
     raw = bytearray()
     for s in strings:
@@ -413,7 +414,7 @@ def _build_bxml_bytes(strings, pool, attrs, nodes, version, unknown) -> tuple[by
     comp = zlib.compress(raw_bytes)
     h = HEADER.pack(SIG, version, len(strings), pool_pointer, len(pool),
                     len(attrs), len(nodes), unknown, len(comp))
-    return h + comp, raw_bytes
+    return h + comp + trailer, raw_bytes
 
 def _map_xml_to_source_nodes(root: ET.Element, source: Parsed) -> dict[int, ET.Element]:
     """Map each source node-table index to its corresponding XML element.
@@ -470,8 +471,10 @@ def _encode_xml_preserve_source(root: ET.Element, source: Parsed) -> bytes:
     def typed_for_attr(text: str):
         return parse_typed(text)
 
-    attrs=[]
-    attr_cursor=0
+    # Preserve the attribute table layout exactly. In particular, some game
+    # files use non-zero AttrIndex even when AttrCount is zero; rebuilding the
+    # table sequentially would change otherwise unrelated node records.
+    attrs=list(source.attrs)
     node_objs=[]
 
     # Iterate in source node-table order. The XML element corresponding to a
@@ -479,33 +482,37 @@ def _encode_xml_preserve_source(root: ET.Element, source: Parsed) -> bytes:
     for node_index, src_node in enumerate(source.nodes):
         elem = elem_by_idx[node_index]
         node_name_i = add_string_preserve(elem.tag)
-        source_node_name = source.strings[src_node.name]
-        if elem.tag != source_node_name:
-            # Name changed: use the new string-table index. Node topology is unchanged.
-            pass
+
+        xml_attr_items=[(k,v) for k,v in elem.attrib.items() if k != '_valuetype']
+        if len(xml_attr_items) != src_node.attr_count:
+            raise ValueError(
+                f'Node {node_index} ({source.strings[src_node.name]}) changes attribute count: '
+                f'source={src_node.attr_count}, XML={len(xml_attr_items)}. '
+                'Structural attribute edits are not supported in preserve mode.'
+            )
 
         old_attrs=source.attrs[src_node.attr_index:src_node.attr_index+src_node.attr_count]
         old_by_name={source.strings[a.name]: a for a in old_attrs}
-        # Keep XML attribute order. Existing names reuse their old record shape;
-        # added names get new records.
-        for k,vtext in elem.attrib.items():
-            if k == '_valuetype':
-                continue
+        new_slice=[]
+        for k,vtext in xml_attr_items:
             ni=add_string_preserve(k)
             typ,val=typed_for_attr(vtext)
             old=old_by_name.get(k)
             if old is not None and old.uses_pool and typ == old.value_type:
                 old_val,_=pool_read(pool, old.value_type, old.value)
                 if _raw_equal_value(typ, val, old.value_type, old_val):
-                    attrs.append(Attribute(ni, old.value, old.uses_pool, old.value_type)); continue
+                    new_slice.append(Attribute(ni, old.value, old.uses_pool, old.value_type)); continue
             if old is not None and not old.uses_pool and typ == TYPE_STRING:
                 old_val=source.strings[old.value]
                 if val == old_val:
-                    attrs.append(Attribute(ni, old.value, 0, TYPE_STRING)); continue
+                    new_slice.append(Attribute(ni, old.value, 0, TYPE_STRING)); continue
             if typ == TYPE_STRING:
-                attrs.append(Attribute(ni, add_string_preserve(val), 0, TYPE_STRING))
+                new_slice.append(Attribute(ni, add_string_preserve(val), 0, TYPE_STRING))
             else:
-                attrs.append(Attribute(ni, _pool_add_raw(pool, typ, val), 1, typ))
+                new_slice.append(Attribute(ni, _pool_add_raw(pool, typ, val), 1, typ))
+
+        if src_node.attr_count:
+            attrs[src_node.attr_index:src_node.attr_index+src_node.attr_count]=new_slice
 
         vt_text=elem.attrib.get('_valuetype')
         text=(elem.text or '').strip()
@@ -578,9 +585,8 @@ def _encode_xml_preserve_source(root: ET.Element, source: Parsed) -> bytes:
             else:
                 inner = -1
 
-        ai=attr_cursor
-        ac=len([k for k in elem.attrib if k != '_valuetype'])
-        attr_cursor += ac
+        ai=src_node.attr_index
+        ac=src_node.attr_count
 
         # Child indexing in the BFS node table is unchanged because shape was checked.
         first = node_index + 1 if list(elem) and False else None
@@ -594,7 +600,7 @@ def _encode_xml_preserve_source(root: ET.Element, source: Parsed) -> bytes:
         node_objs[i]=Node(n.name,n.inner,n.uses_pool,n.value_type,
                           src_node.level,src_node.children,n.attr_index,n.attr_count)
 
-    return _build_bxml_bytes(strings,pool,attrs,node_objs,source.header.version,source.header.unknown)[0]
+    return _build_bxml_bytes(strings,pool,attrs,node_objs,source.header.version,source.header.unknown,source.trailer)[0]
 
 
 def encode_xml(xml_path:str, out_path:str, version:int=66538, unknown:int=0,
