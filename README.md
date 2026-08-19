@@ -7,13 +7,13 @@
 # Reflex BXML Editor
 <img width="1021" height="693" alt="image" src="https://github.com/user-attachments/assets/dd014815-20dc-4b58-b6c2-4e5eccae54ef" />
 
-Game file editor (MX vs ATV: Reflex) with a BXML structure `except for savegame.bxml`
+Game file editor (MX vs ATV: Reflex) with a BXML structure
 
-It allows you to edit `.bxml`, `.database`, and `.level` files and rebuild them.
+It allows you to edit `.bxml`, `.database`, `.level` and `savegame.bxml` files and rebuild them.
 
 ## Features
-+ Edit `.bxml`, `.database`, and `.level` files.
-+ Rebuild `.bxml`, `.database`, and `.level` files.
++ Edit `.bxml`, `.database`, `.level` and `savegame.bxml` files.
++ Rebuild `.bxml`, `.database`, `.level` and `savegame.bxml` files.
 + Property Editor
 + Edit Raw XML
 + Save XML
