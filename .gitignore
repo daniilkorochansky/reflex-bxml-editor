@@ -71,3 +71,4 @@ dist/
 build/
 *.spec
 *.bat
+*.old

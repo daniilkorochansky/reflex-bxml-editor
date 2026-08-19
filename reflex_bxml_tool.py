@@ -34,11 +34,33 @@ SIG = 0x4C4D5842
 
 TYPE_STRING = 1
 TYPE_INT = 3
+TYPE_UINT = 4
 TYPE_FLOAT = 5
+TYPE_COLOR = 7
+TYPE_MATRIX = 8
 TYPE_VECTOR3 = 10
 TYPE_BOOL = 11
-TYPE_NAMES = {1:'string', 3:'int', 5:'float', 10:'vector3', 11:'bool'}
-PREFIXES = {'_int:': TYPE_INT, '_float:': TYPE_FLOAT, '_vector3:': TYPE_VECTOR3, '_bool:': TYPE_BOOL}
+
+TYPE_NAMES = {
+    TYPE_STRING: 'string',
+    TYPE_INT: 'int',
+    TYPE_UINT: 'uint',
+    TYPE_FLOAT: 'float',
+    TYPE_COLOR: 'color',
+    TYPE_MATRIX: 'matrix',
+    TYPE_VECTOR3: 'vector3',
+    TYPE_BOOL: 'bool',
+}
+
+PREFIXES = {
+    '_int:': TYPE_INT,
+    '_uint:': TYPE_UINT,
+    '_float:': TYPE_FLOAT,
+    '_color:': TYPE_COLOR,
+    '_matrix:': TYPE_MATRIX,
+    '_vector3:': TYPE_VECTOR3,
+    '_bool:': TYPE_BOOL,
+}
 
 @dataclass
 class Header:
@@ -89,20 +111,39 @@ def decode(path:str)->Parsed:
     return Parsed(h,strings,pool,attrs,nodes,raw,comp)
 
 def pool_read(pool:bytes, typ:int, off:int):
-    if off<0 or off>=len(pool): raise ValueError(f'Pool offset out of range: {off}')
-    if typ==TYPE_INT:
-        if off+4>len(pool): raise ValueError('Truncated int in pool')
-        return struct.unpack_from('<i',pool,off)[0],4
-    if typ==TYPE_FLOAT:
-        if off+4>len(pool): raise ValueError('Truncated float in pool')
-        return struct.unpack_from('<f',pool,off)[0],4
-    if typ==TYPE_VECTOR3:
-        if off+12>len(pool): raise ValueError('Truncated vector3 in pool')
-        return struct.unpack_from('<3f',pool,off),12
-    if typ==TYPE_BOOL:
-        if off+4>len(pool): raise ValueError('Truncated bool in pool')
-        v=struct.unpack_from('<I',pool,off)[0]
-        return bool(v),4
+    if off < 0 or off >= len(pool):
+        raise ValueError(f'Pool offset out of range: {off}')
+
+    if typ in (TYPE_INT, TYPE_UINT, TYPE_FLOAT):
+        if off + 4 > len(pool):
+            raise ValueError(f'Truncated {TYPE_NAMES.get(typ, typ)} in pool')
+        if typ == TYPE_INT:
+            return struct.unpack_from('<i', pool, off)[0], 4
+        if typ == TYPE_UINT:
+            return struct.unpack_from('<I', pool, off)[0], 4
+        return struct.unpack_from('<f', pool, off)[0], 4
+
+    if typ == TYPE_COLOR:
+        if off + 16 > len(pool):
+            raise ValueError('Truncated color in pool')
+        return struct.unpack_from('<4f', pool, off), 16
+
+    if typ == TYPE_MATRIX:
+        if off + 64 > len(pool):
+            raise ValueError('Truncated matrix in pool')
+        return struct.unpack_from('<16f', pool, off), 64
+
+    if typ == TYPE_VECTOR3:
+        if off + 12 > len(pool):
+            raise ValueError('Truncated vector3 in pool')
+        return struct.unpack_from('<3f', pool, off), 12
+
+    if typ == TYPE_BOOL:
+        if off + 4 > len(pool):
+            raise ValueError('Truncated bool in pool')
+        v = struct.unpack_from('<I', pool, off)[0]
+        return bool(v), 4
+
     raise ValueError(f'Unsupported pool type {typ}')
 
 def fmt_float(v:float)->str:
@@ -110,119 +151,177 @@ def fmt_float(v:float)->str:
     return format(v,'.9g')
 
 def value_to_text(v, typ:int)->str:
-    if typ==TYPE_INT: return str(v)
-    if typ==TYPE_FLOAT: return fmt_float(v)
-    if typ==TYPE_VECTOR3: return ','.join(fmt_float(x) for x in v)
-    if typ==TYPE_BOOL: return 'true' if v else 'false'
+    if typ in (TYPE_INT, TYPE_UINT):
+        return str(v)
+    if typ == TYPE_FLOAT:
+        return fmt_float(v)
+    if typ in (TYPE_COLOR, TYPE_VECTOR3, TYPE_MATRIX):
+        return ','.join(fmt_float(x) for x in v)
+    if typ == TYPE_BOOL:
+        return 'true' if v else 'false'
     return str(v)
 
 def xml_escape_attr(s:str)->str:
     return s.replace('&','&amp;').replace('"','&quot;').replace('<','&lt;').replace('>','&gt;')
 
 def to_xml_text(parsed:Parsed)->str:
-    h=parsed.header; strings=parsed.strings; pool=parsed.pool; attrs=parsed.attrs; nodes=parsed.nodes
-    lines=[]
-    def emit_range(start:int,count:int,indent:int):
-        for idx in range(start,start+count):
-            n=nodes[idx]
-            if n.name>=len(strings): raise ValueError(f'Invalid node string index {n.name}')
-            line=' '*indent+'<'+strings[n.name]
+    strings = parsed.strings
+    pool = parsed.pool
+    attrs = parsed.attrs
+    nodes = parsed.nodes
+    lines = []
+
+    def attr_value_text(a:Attribute) -> str:
+        if a.uses_pool:
+            v, _ = pool_read(pool, a.value_type, a.value)
+            prefix = {
+                TYPE_INT: '_int:',
+                TYPE_UINT: '_uint:',
+                TYPE_FLOAT: '_float:',
+                TYPE_COLOR: '_color:',
+                TYPE_MATRIX: '_matrix:',
+                TYPE_VECTOR3: '_vector3:',
+                TYPE_BOOL: '_bool:',
+            }.get(a.value_type, '')
+            return prefix + value_to_text(v, a.value_type)
+
+        if a.value < 0 or a.value >= len(strings):
+            raise ValueError('Invalid attribute value index')
+        return strings[a.value]
+
+    def emit_range(start:int, count:int, indent:int):
+        for idx in range(start, start + count):
+            n = nodes[idx]
+            if n.name < 0 or n.name >= len(strings):
+                raise ValueError(f'Invalid node string index {n.name}')
+
+            line = ' ' * indent + '<' + strings[n.name]
+
             for j in range(n.attr_count):
-                a=attrs[n.attr_index+j]
-                if a.name>=len(strings): raise ValueError('Invalid attribute name index')
-                name=strings[a.name]
-                if a.uses_pool:
-                    v,sz=pool_read(pool,a.value_type,a.value)
-                    val=('_int:' if a.value_type==3 else '_float:' if a.value_type==5 else '_vector3:' if a.value_type==10 else '_bool:' if a.value_type==11 else '')+value_to_text(v,a.value_type)
-                else:
-                    if a.value>=len(strings): raise ValueError('Invalid attribute value index')
-                    val=strings[a.value]
-                line += f' {name}="{xml_escape_attr(val)}"'
+                ai = n.attr_index + j
+                if ai < 0 or ai >= len(attrs):
+                    raise ValueError(f'Invalid attribute index {ai}')
+                a = attrs[ai]
+                if a.name < 0 or a.name >= len(strings):
+                    raise ValueError(f'Invalid attribute name index {a.name}')
+                line += f' {strings[a.name]}="{xml_escape_attr(attr_value_text(a))}"'
+
             if n.uses_pool:
                 line += f' _valuetype="{TYPE_NAMES.get(n.value_type, str(n.value_type))}"'
-            if n.children==0 and n.inner==-1:
-                lines.append(line+'/>'); continue
-            lines.append(line+'>')
+
+            # Leaf without a value.
+            if n.children == 0 and n.inner == -1:
+                lines.append(line + '/>')
+                continue
+
+            lines.append(line + '>')
+
+            # Node values in these game BXML files use NInnerTextIndex as the
+            # actual pool offset. This is important for scene files, which
+            # contain UInt/Color/Matrix values.
             if n.uses_pool:
-                v,_=pool_read(pool,n.value_type, n.inner if n.inner>=0 else 0) if False else (None,0)
-                # Node pool values are consumed sequentially, not by NInnerTextIndex.
-                # Actual offset is assigned below using a mutable pool cursor.
-                raise RuntimeError('internal: pool-node emission requires cursor')
-            if n.children==0 and n.inner>=0:
-                lines.append(' '*(indent+3)+strings[n.inner])
+                v, _ = pool_read(pool, n.value_type, n.inner)
+                lines.append(' ' * (indent + 3) + value_to_text(v, n.value_type))
+            elif n.children == 0 and n.inner >= 0:
+                if n.inner >= len(strings):
+                    raise ValueError(f'Invalid node inner-text string index {n.inner}')
+                lines.append(' ' * (indent + 3) + strings[n.inner])
+
             if n.children:
-                emit_range(n.level,n.children,indent+3)
-            lines.append(' '*indent+'</'+strings[n.name]+'>')
-    # The original decoder uses a global pool cursor for node values, after
-    # attributes are inspected. We reproduce that traversal with an explicit cursor.
-    pool_cursor=0
-    def emit_range2(start:int,count:int,indent:int):
-        nonlocal pool_cursor
-        for idx in range(start,start+count):
-            n=nodes[idx]; line=' '*indent+'<'+strings[n.name]
-            for j in range(n.attr_count):
-                a=attrs[n.attr_index+j]
-                name=strings[a.name]
-                if a.uses_pool:
-                    v,sz=pool_read(pool,a.value_type,a.value)
-                    val=('_int:' if a.value_type==3 else '_float:' if a.value_type==5 else '_vector3:' if a.value_type==10 else '_bool:' if a.value_type==11 else '')+value_to_text(v,a.value_type)
-                else: val=strings[a.value]
-                line += f' {name}="{xml_escape_attr(val)}"'
-            if n.uses_pool: line += f' _valuetype="{TYPE_NAMES.get(n.value_type,str(n.value_type))}"'
-            if n.children==0 and n.inner==-1:
-                lines.append(line+'/>' ); continue
-            lines.append(line+'>')
-            if n.uses_pool:
-                v,sz=pool_read(pool,n.value_type,pool_cursor); pool_cursor += sz
-                lines.append(' '*(indent+3)+value_to_text(v,n.value_type))
-            elif n.children==0 and n.inner>=0:
-                lines.append(' '*(indent+6)+strings[n.inner])
-            if n.children: emit_range2(n.level,n.children,indent+3)
-            lines.append(' '*indent+'</'+strings[n.name]+'>')
-    emit_range2(0,1,0)
-    return '\n'.join(lines)+'\n'
+                emit_range(n.level, n.children, indent + 3)
+
+            lines.append(' ' * indent + '</' + strings[n.name] + '>')
+
+    emit_range(0, 1, 0)
+    return '\n'.join(lines) + '\n'
+
+def parse_float_list(body:str, count:int, label:str):
+    parts = [float(x.strip()) for x in body.split(',') if x.strip() != '']
+    if len(parts) != count:
+        raise ValueError(f'{label} requires {count} components: {body}')
+    return tuple(parts)
 
 def parse_typed(text:str):
-    for p,t in PREFIXES.items():
-        if text.startswith(p):
-            body=text[len(p):]
-            if t==TYPE_INT:
-                # Some game-supplied XML files use the literal `None` for an
-                # integer field whose compiled BXML representation is 0.
-                # The original BXML decoder itself reads the binary value as
-                # int32, so BXML -> XML remains `_int:0`; this compatibility
-                # rule is only for XML -> BXML.
-                if body.strip().lower() == 'none':
-                    return t,0
-                return t,int(body)
-            if t==TYPE_FLOAT: return t,float(body)
-            if t==TYPE_VECTOR3:
-                parts=[float(x.strip()) for x in body.split(',')]
-                if len(parts)!=3: raise ValueError(f'vector3 requires 3 components: {text}')
-                return t,tuple(parts)
-            if t==TYPE_BOOL:
-                if body.lower() in ('true','1'): return t,True
-                if body.lower() in ('false','0'): return t,False
+    for pfx, typ in PREFIXES.items():
+        if text.startswith(pfx):
+            body = text[len(pfx):].strip()
+
+            if typ == TYPE_INT:
+                if body.lower() == 'none':
+                    return typ, 0
+                return typ, int(body)
+
+            if typ == TYPE_UINT:
+                if body.lower() == 'none':
+                    return typ, 0
+                value = int(body, 10)
+                if not 0 <= value <= 0xFFFFFFFF:
+                    raise ValueError(f'uint32 out of range: {body}')
+                return typ, value
+
+            if typ == TYPE_FLOAT:
+                return typ, float(body)
+
+            if typ == TYPE_COLOR:
+                return typ, parse_float_list(body, 4, 'color')
+
+            if typ == TYPE_MATRIX:
+                return typ, parse_float_list(body, 16, 'matrix')
+
+            if typ == TYPE_VECTOR3:
+                return typ, parse_float_list(body, 3, 'vector3')
+
+            if typ == TYPE_BOOL:
+                if body.lower() in ('true', '1'):
+                    return typ, True
+                if body.lower() in ('false', '0'):
+                    return typ, False
                 raise ValueError(f'Invalid bool: {text}')
-    return TYPE_STRING,text
+
+    return TYPE_STRING, text
 
 def add_string(strings, index, s):
     if s not in index:
         index[s]=len(strings); strings.append(s)
     return index[s]
 
-def encode_xml(xml_path:str, out_path:str, version:int=66538, unknown:int=0, verify_source:Optional[str]=None):
-    root=ET.parse(xml_path).getroot()
+def _raw_equal_value(a_type: int, a_value, b_type: int, b_value) -> bool:
+    if a_type != b_type:
+        return False
+    if a_type == TYPE_FLOAT:
+        return struct.pack('<f', float(a_value)) == struct.pack('<f', float(b_value))
+    if a_type in (TYPE_COLOR, TYPE_MATRIX, TYPE_VECTOR3):
+        return struct.pack('<' + 'f' * len(a_value), *a_value) == struct.pack('<' + 'f' * len(b_value), *b_value)
+    return a_value == b_value
+
+
+def _pool_add_raw(pool: bytearray, typ: int, val) -> int:
+    off = len(pool)
+    if typ == TYPE_INT:
+        pool.extend(struct.pack('<i', int(val)))
+    elif typ == TYPE_UINT:
+        pool.extend(struct.pack('<I', int(val)))
+    elif typ == TYPE_FLOAT:
+        pool.extend(struct.pack('<f', float(val)))
+    elif typ == TYPE_COLOR:
+        pool.extend(struct.pack('<4f', *val))
+    elif typ == TYPE_MATRIX:
+        pool.extend(struct.pack('<16f', *val))
+    elif typ == TYPE_VECTOR3:
+        pool.extend(struct.pack('<3f', *val))
+    elif typ == TYPE_BOOL:
+        pool.extend(struct.pack('<I', 1 if val else 0))
+    else:
+        raise ValueError(f'Cannot put type {typ} in pool')
+    return off
+
+
+def _encode_xml_fresh(root: ET.Element, version: int, unknown: int) -> bytes:
+    """Encode without a source BXML. This is the original/new-file path."""
     strings=[]; sidx={}; pool=bytearray(); attrs=[]
 
-    def pool_add(typ,val):
-        off=len(pool)
-        if typ==TYPE_INT: pool.extend(struct.pack('<i',val))
-        elif typ==TYPE_FLOAT: pool.extend(struct.pack('<f',val))
-        elif typ==TYPE_VECTOR3: pool.extend(struct.pack('<3f',*val))
-        elif typ==TYPE_BOOL: pool.extend(struct.pack('<I',1 if val else 0))
-        else: raise ValueError(f'Cannot put type {typ} in pool')
-        return off
+    def add_pool(typ, val):
+        return _pool_add_raw(pool, typ, val)
 
     def make_node(elem, attr_index):
         name_i=add_string(strings,sidx,elem.tag)
@@ -240,86 +339,300 @@ def encode_xml(xml_path:str, out_path:str, version:int=66538, unknown:int=0, ver
             ni=add_string(strings,sidx,k)
             if typ==TYPE_STRING:
                 vi=add_string(strings,sidx,val)
-                attr_specs.append((ni,vi,0,TYPE_STRING,None))
+                attr_specs.append(Attribute(ni,vi,0,TYPE_STRING))
             else:
-                attr_specs.append((ni,None,1,typ,val))
-        # Pool allocation for attributes is in node order, before node value.
-        for ni,vi,up,typ,val in attr_specs:
-            if up:
-                off=pool_add(typ,val); attrs.append(Attribute(ni,off,1,typ))
-            else:
-                attrs.append(Attribute(ni,vi,0,typ))
-        # In BXML, a normal node containing string inner text has
-        # UsesPool=0 but ValueType=1 (string).  The original decoder relies
-        # on this field even though the actual text is referenced by
-        # NInnerTextIndex.
+                off=add_pool(typ,val)
+                attr_specs.append(Attribute(ni,off,1,typ))
+        attrs.extend(attr_specs)
         uses=0; vtype=TYPE_STRING if inner >= 0 else 0
         if vt_text is not None:
-            vtype={'string':1,'int':3,'float':5,'vector3':10,'bool':11}.get(vt_text)
-            if vtype is None: raise ValueError(f'Unknown _valuetype: {vt_text}')
+            vtype={
+                'string': TYPE_STRING, 'int': TYPE_INT, 'uint': TYPE_UINT,
+                'float': TYPE_FLOAT, 'color': TYPE_COLOR, 'matrix': TYPE_MATRIX,
+                'vector3': TYPE_VECTOR3, 'bool': TYPE_BOOL,
+            }.get(vt_text)
+            if vtype is None:
+                raise ValueError(f'Unknown _valuetype: {vt_text}')
             uses=1
-            if vtype==TYPE_STRING:
+            if vtype == TYPE_STRING:
                 inner=add_string(strings,sidx,text) if text else -1
-                pool_inner=inner
             else:
-                _,val=parse_typed({'int':'_int:','float':'_float:','vector3':'_vector3:','bool':'_bool:'}[TYPE_NAMES[vtype]]+text)
-                pool_inner=pool_add(vtype,val)
-            inner=pool_inner
+                _, val=parse_typed({
+                    TYPE_INT:'_int:', TYPE_UINT:'_uint:', TYPE_FLOAT:'_float:',
+                    TYPE_COLOR:'_color:', TYPE_MATRIX:'_matrix:',
+                    TYPE_VECTOR3:'_vector3:', TYPE_BOOL:'_bool:'
+                }[vtype] + text)
+                inner=add_pool(vtype,val)
         return name_i,inner,uses,vtype,len(attr_specs)
 
-    # Build a temporary tree with the exact XML child order.
     class T:
-        __slots__=('elem','children','node')
-        def __init__(self,e): self.elem=e; self.children=[T(c) for c in list(e)]; self.node=None
-    tree=T(root)
+        __slots__=('elem','children','node','index')
+        def __init__(self,e):
+            self.elem=e; self.children=[T(c) for c in list(e)]; self.node=None; self.index=-1
 
-    # The BXML node table is level-order (breadth-first): all siblings on a
-    # level are stored before their children. NLevelId points to the first
-    # child in that flattened table.
-    levels=[[tree]]
+    tree=T(root); levels=[[tree]]
     while True:
         nxt=[]
         for t in levels[-1]: nxt.extend(t.children)
         if not nxt: break
         levels.append(nxt)
 
-    # String-table/pool generation follows the same level order for node data.
-    # Attribute records remain contiguous by node order.
-    nodes=[]
-    attr_cursor=0
+    nodes=[]; attr_cursor=0
     for level in levels:
         for t in level:
-            name_i,inner,uses,vtype,ac=make_node(t.elem,attr_cursor)
-            t.node=(name_i,inner,uses,vtype,attr_cursor,ac)
-            attr_cursor += ac
+            t.index=len(nodes)
+            data=make_node(t.elem,attr_cursor)
+            t.node=(data[0],data[1],data[2],data[3],attr_cursor,data[4])
+            attr_cursor += data[4]
             nodes.append(t)
-    node_index={id(t):i for i,t in enumerate(nodes)}
+
     node_objs=[]
-    for i,t in enumerate(nodes):
+    for t in nodes:
         name_i,inner,uses,vtype,ai,ac=t.node
-        if t.children:
-            first=node_index[id(t.children[0])]
-            cc=len(t.children)
-        else:
-            first=len(nodes)
-            cc=0
+        first=t.children[0].index if t.children else len(nodes)
+        cc=len(t.children)
         node_objs.append(Node(name_i,inner,uses,vtype,first,cc,ai,ac))
 
-    raw=bytearray()
-    for s in strings: raw.extend(s.encode('utf-8')); raw.append(0)
-    pool_pointer=len(raw); raw.extend(pool)
-    for a in attrs: raw.extend(ATTR.pack(a.name,a.value,a.uses_pool,a.value_type))
-    for n in node_objs: raw.extend(NODE.pack(n.name,n.inner,n.uses_pool,n.value_type,n.level,n.children,n.attr_index,n.attr_count))
-    comp=zlib.compress(bytes(raw))
-    h=HEADER.pack(SIG,version,len(strings),pool_pointer,len(pool),len(attrs),len(node_objs),unknown,len(comp))
-    Path(out_path).write_bytes(h+comp)
+    return _build_bxml_bytes(strings,pool,attrs,node_objs,version,unknown)
+
+
+def _build_bxml_bytes(strings, pool, attrs, nodes, version, unknown) -> tuple[bytes, bytes]:
+    """Build a BXML blob and return (file_bytes, decompressed_raw)."""
+    raw = bytearray()
+    for s in strings:
+        raw.extend(s.encode('utf-8'))
+        raw.append(0)
+    pool_pointer = len(raw)
+    raw.extend(pool)
+    for a in attrs:
+        raw.extend(ATTR.pack(a.name, a.value, a.uses_pool, a.value_type))
+    for n in nodes:
+        raw.extend(NODE.pack(n.name, n.inner, n.uses_pool, n.value_type,
+                             n.level, n.children, n.attr_index, n.attr_count))
+    raw_bytes = bytes(raw)
+    comp = zlib.compress(raw_bytes)
+    h = HEADER.pack(SIG, version, len(strings), pool_pointer, len(pool),
+                    len(attrs), len(nodes), unknown, len(comp))
+    return h + comp, raw_bytes
+
+def _map_xml_to_source_nodes(root: ET.Element, source: Parsed) -> dict[int, ET.Element]:
+    """Map each source node-table index to its corresponding XML element.
+
+    BXML nodes are stored breadth-first/level-order, while XML is naturally
+    serialized depth-first. Therefore a simple XML BFS comparison is wrong for
+    nested scene data. The Node.level/children range gives us the exact mapping.
+    """
+    mapping: dict[int, ET.Element] = {}
+
+    def visit(src_index: int, elem: ET.Element) -> None:
+        if src_index in mapping:
+            raise ValueError(f'Duplicate source node mapping at index {src_index}')
+        mapping[src_index] = elem
+        n = source.nodes[src_index]
+        children = list(elem)
+        if len(children) != n.children:
+            raise ValueError(
+                f'Node {src_index} ({source.strings[n.name]}) has {n.children} '
+                f'BXML children, but XML has {len(children)} children.'
+            )
+        if n.children:
+            first = n.level
+            if first < 0 or first + n.children > len(source.nodes):
+                raise ValueError(
+                    f'Node {src_index} child range {first}:{first+n.children} is invalid'
+                )
+            for off, child in enumerate(children):
+                visit(first + off, child)
+
+    visit(0, root)
+    if len(mapping) != len(source.nodes):
+        missing=sorted(set(range(len(source.nodes))) - set(mapping))
+        raise ValueError(f'XML does not cover all BXML nodes; missing indices: {missing[:10]}')
+    return mapping
+
+
+def _encode_xml_preserve_source(root: ET.Element, source: Parsed) -> bytes:
+    """Re-encode XML while preserving source string table, pool and record layout.
+
+    Unchanged values retain their original indexes/offsets, so decode -> encode
+    can reproduce the original raw and compressed bytes. New/changed strings or
+    pool values are appended rather than rewriting existing data.
+    """
+    elem_by_idx = _map_xml_to_source_nodes(root, source)
+
+    strings=list(source.strings)
+    sidx={s:i for i,s in enumerate(strings)}
+    pool=bytearray(source.pool)
+
+    def add_string_preserve(s: str) -> int:
+        return add_string(strings, sidx, s)
+
+    def typed_for_attr(text: str):
+        return parse_typed(text)
+
+    attrs=[]
+    attr_cursor=0
+    node_objs=[]
+
+    # Iterate in source node-table order. The XML element corresponding to a
+    # source node was found recursively from its child ranges above.
+    for node_index, src_node in enumerate(source.nodes):
+        elem = elem_by_idx[node_index]
+        node_name_i = add_string_preserve(elem.tag)
+        source_node_name = source.strings[src_node.name]
+        if elem.tag != source_node_name:
+            # Name changed: use the new string-table index. Node topology is unchanged.
+            pass
+
+        old_attrs=source.attrs[src_node.attr_index:src_node.attr_index+src_node.attr_count]
+        old_by_name={source.strings[a.name]: a for a in old_attrs}
+        # Keep XML attribute order. Existing names reuse their old record shape;
+        # added names get new records.
+        for k,vtext in elem.attrib.items():
+            if k == '_valuetype':
+                continue
+            ni=add_string_preserve(k)
+            typ,val=typed_for_attr(vtext)
+            old=old_by_name.get(k)
+            if old is not None and old.uses_pool and typ == old.value_type:
+                old_val,_=pool_read(pool, old.value_type, old.value)
+                if _raw_equal_value(typ, val, old.value_type, old_val):
+                    attrs.append(Attribute(ni, old.value, old.uses_pool, old.value_type)); continue
+            if old is not None and not old.uses_pool and typ == TYPE_STRING:
+                old_val=source.strings[old.value]
+                if val == old_val:
+                    attrs.append(Attribute(ni, old.value, 0, TYPE_STRING)); continue
+            if typ == TYPE_STRING:
+                attrs.append(Attribute(ni, add_string_preserve(val), 0, TYPE_STRING))
+            else:
+                attrs.append(Attribute(ni, _pool_add_raw(pool, typ, val), 1, typ))
+
+        vt_text=elem.attrib.get('_valuetype')
+        text=(elem.text or '').strip()
+        has_children=len(elem)>0
+
+        uses=src_node.uses_pool
+        vtype=src_node.value_type
+        # Preserve the source node value mode when the XML still describes the
+        # same kind. Otherwise, use the XML's explicit _valuetype.
+        if vt_text is not None:
+            wanted={
+                'string': TYPE_STRING, 'int': TYPE_INT, 'uint': TYPE_UINT,
+                'float': TYPE_FLOAT, 'color': TYPE_COLOR, 'matrix': TYPE_MATRIX,
+                'vector3': TYPE_VECTOR3, 'bool': TYPE_BOOL,
+            }.get(vt_text)
+            if wanted is None:
+                raise ValueError(f'Unknown _valuetype: {vt_text}')
+            uses = src_node.uses_pool if src_node.uses_pool != 0 and src_node.value_type == wanted else 1
+            vtype=wanted
+        elif not has_children and text:
+            uses=0; vtype=TYPE_STRING
+        else:
+            uses=src_node.uses_pool; vtype=src_node.value_type
+
+        old_text = None
+        if src_node.uses_pool:
+            old_text,_ = pool_read(source.pool, src_node.value_type, src_node.inner)
+        elif src_node.inner >= 0 and src_node.inner < len(source.strings):
+            old_text = source.strings[src_node.inner]
+
+        if uses:
+            if vtype == TYPE_STRING:
+                inner = add_string_preserve(text) if text else -1
+                # A source string node has no pool value, despite ValueType=string.
+            else:
+                # Reuse source pool slot iff type/value is bit-identical.
+                if src_node.uses_pool and src_node.value_type == vtype and old_text is not None:
+                    _, new_val = parse_typed({
+                        TYPE_INT:'_int:', TYPE_UINT:'_uint:', TYPE_FLOAT:'_float:',
+                        TYPE_COLOR:'_color:', TYPE_MATRIX:'_matrix:',
+                        TYPE_VECTOR3:'_vector3:', TYPE_BOOL:'_bool:'
+                    }[vtype] + text)
+                    if _raw_equal_value(vtype, new_val, src_node.value_type, old_text):
+                        inner = src_node.inner
+                    else:
+                        inner = _pool_add_raw(pool, vtype, new_val)
+                else:
+                    _, new_val = parse_typed({
+                        TYPE_INT:'_int:', TYPE_UINT:'_uint:', TYPE_FLOAT:'_float:',
+                        TYPE_COLOR:'_color:', TYPE_MATRIX:'_matrix:',
+                        TYPE_VECTOR3:'_vector3:', TYPE_BOOL:'_bool:'
+                    }[vtype] + text)
+                    inner = _pool_add_raw(pool, vtype, new_val)
+        else:
+            if not has_children:
+                # Preserve the original string-table index when the source node
+                # referenced a string, including the important empty-string case.
+                # XML text is stripped by the decoder, so compare against the
+                # stripped source string before deciding whether the value changed.
+                if src_node.inner >= 0 and src_node.inner < len(source.strings):
+                    old_str = source.strings[src_node.inner]
+                    if text == old_str.strip():
+                        inner = src_node.inner
+                    else:
+                        inner = add_string_preserve(text)
+                elif text:
+                    inner = add_string_preserve(text)
+                else:
+                    inner = -1
+            else:
+                inner = -1
+
+        ai=attr_cursor
+        ac=len([k for k in elem.attrib if k != '_valuetype'])
+        attr_cursor += ac
+
+        # Child indexing in the BFS node table is unchanged because shape was checked.
+        first = node_index + 1 if list(elem) and False else None
+        node_objs.append(Node(node_name_i, inner, uses, vtype,
+                              0, len(list(elem)), ai, ac))
+
+    # Child ranges are part of the original node table. Keep them byte-for-byte
+    # identical unless a future structural-edit mode explicitly rebuilds them.
+    for i, src_node in enumerate(source.nodes):
+        n=node_objs[i]
+        node_objs[i]=Node(n.name,n.inner,n.uses_pool,n.value_type,
+                          src_node.level,src_node.children,n.attr_index,n.attr_count)
+
+    return _build_bxml_bytes(strings,pool,attrs,node_objs,source.header.version,source.header.unknown)[0]
+
+
+def encode_xml(xml_path:str, out_path:str, version:int=66538, unknown:int=0,
+               verify_source:Optional[str]=None, source_bxml:Optional[str]=None):
+    root=ET.parse(xml_path).getroot()
+    source_path=source_bxml or verify_source
+    if source_path:
+        source=decode(source_path)
+        blob = _encode_xml_preserve_source(root, source)
+
+        # If the rebuilt decompressed payload is exactly identical to the
+        # source payload, return the original file byte-for-byte. This keeps
+        # the original zlib stream as well as every header byte.
+        rebuilt_raw = zlib.decompress(blob[HEADER.size:])
+        original_blob = Path(source_path).read_bytes()
+        if rebuilt_raw == source.raw:
+            blob = original_blob
+
+        Path(out_path).write_bytes(blob)
+
+        if verify_source:
+            original = Path(verify_source).read_bytes()
+            if blob != original:
+                m = min(len(blob), len(original))
+                at = next((i for i in range(m) if blob[i] != original[i]), m)
+                raise ValueError(
+                    f'Byte mismatch at offset {at}: '
+                    f'original={original[at:at+16].hex()} new={blob[at:at+16].hex()}'
+                )
+        return
+
+    blob=_encode_xml_fresh(root, version, unknown)
+    Path(out_path).write_bytes(blob)
     if verify_source:
         src=decode(verify_source)
-        if src.raw!=bytes(raw):
-            m=min(len(src.raw),len(raw)); at=next((i for i in range(m) if src.raw[i]!=raw[i]),m)
-            raise ValueError(f'Round-trip raw mismatch at offset {at}: original={src.raw[at:at+16].hex()} new={bytes(raw)[at:at+16].hex()}')
-        if src.compressed!=comp:
-            raise ValueError('Raw data matches, but zlib stream differs')
+        if src.raw != zlib.decompress(blob[HEADER.size:]):
+            raise ValueError('Raw data mismatch')
+
 
 def inspect(path:str):
     p=decode(path); h=p.header
@@ -357,21 +670,23 @@ def main():
     ap=argparse.ArgumentParser(description='MX vs ATV Reflex BXML tool')
     sub=ap.add_subparsers(dest='cmd',required=True)
     d=sub.add_parser('decode'); d.add_argument('input'); d.add_argument('output')
-    e=sub.add_parser('encode'); e.add_argument('input'); e.add_argument('output'); e.add_argument('--verify-source')
+    e=sub.add_parser('encode'); e.add_argument('input'); e.add_argument('output'); e.add_argument('--source'); e.add_argument('--verify-source')
     i=sub.add_parser('inspect'); i.add_argument('input')
     r=sub.add_parser('roundtrip'); r.add_argument('input'); r.add_argument('--keep-xml',action='store_true')
     a=ap.parse_args()
     try:
         if a.cmd=='decode': Path(a.output).write_text(to_xml_text(decode(a.input)),encoding='utf-8')
-        elif a.cmd=='encode': encode_xml(a.input,a.output,verify_source=a.verify_source)
+        elif a.cmd=='encode': encode_xml(a.input,a.output,verify_source=a.verify_source,source_bxml=a.source)
         elif a.cmd=='inspect': inspect(a.input)
         elif a.cmd=='roundtrip':
             p=Path(a.input); xml=p.with_suffix(p.suffix+'.roundtrip.xml'); out=p.with_suffix(p.suffix+'.roundtrip.bxml')
             xml.write_text(to_xml_text(decode(str(p))),encoding='utf-8')
-            encode_xml(str(xml),str(out))
+            encode_xml(str(xml),str(out),source_bxml=str(p),verify_source=str(p))
             if semantic_tree_from_bxml(str(out)) != semantic_tree_from_bxml(str(p)):
                 raise ValueError('Round-trip semantic comparison failed')
-            print(f'OK: semantic round-trip: {out}')
+            if Path(out).read_bytes() != p.read_bytes():
+                raise ValueError('Round-trip byte comparison failed')
+            print(f'OK: byte-identical round-trip: {out}')
             if not a.keep_xml: xml.unlink()
     except Exception as ex:
         print(f'ERROR: {ex}',file=sys.stderr); return 1

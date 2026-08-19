@@ -342,7 +342,13 @@ class MainFrame(wx.Frame):
                 shutil.copy2(out, bak)
 
             backend = dbxml if self.is_database else bxml
-            backend.encode_xml(str(tmp), str(out))
+            if self.is_database:
+                backend.encode_xml(str(tmp), str(out))
+            else:
+                backend.encode_xml(str(tmp), str(out), source_bxml=str(self.current_bxml))
+            self.current_bxml = out
+            self.parsed = backend.decode(str(out))
+            self._capture_originals(self._xml_root)
             self._set_modified(False)
             self.SetStatusText(f"Built: {out.name}", 0)
             wx.MessageBox(
@@ -400,37 +406,46 @@ class MainFrame(wx.Frame):
             return "float"
         if value.startswith("_vector3:"):
             return "vector3"
+        if value.startswith("_color:"):
+            return "color"
+        if value.startswith("_matrix:"):
+            return "matrix"
         if value.startswith("_bool:"):
             return "bool"
         return "string"
 
     @staticmethod
+    @staticmethod
     def _format_float_game(value):
-        # Game XML uses comma as decimal separator.
         s = f"{float(value):.8f}".rstrip("0").rstrip(".")
         if s == "-0":
             s = "0"
-        return s.replace(".", ",")
+        return s
 
     @staticmethod
     def _parse_game_float(raw):
         return float(raw.strip().replace(",", "."))
 
-    @classmethod
-    def _parse_game_vector3(cls, raw):
-        # The decoder's XML form uses comma for decimals, so a vector such as
-        # 1931,42,83,13,-1120,58 represents 1931.42 / 83.13 / -1120.58.
+    @staticmethod
+    def _parse_game_vector3(raw):
         parts = [p.strip() for p in raw.split(",") if p.strip()]
-        if len(parts) == 3:
-            return [float(p) for p in parts]
-        if len(parts) == 6:
-            return [float(parts[0] + "." + parts[1]),
-                    float(parts[2] + "." + parts[3]),
-                    float(parts[4] + "." + parts[5])]
-        raise ValueError("vector3 must contain three values")
+        if len(parts) != 3:
+            raise ValueError("vector3 must contain three values")
+        return [float(p) for p in parts]
 
     @classmethod
     def _format_game_vector3(cls, values):
+        return ",".join(cls._format_float_game(v) for v in values)
+
+    @classmethod
+    def _parse_numeric_list(cls, raw, count, label):
+        parts = [p.strip() for p in raw.split(",") if p.strip()]
+        if len(parts) != count:
+            raise ValueError(f"{label} must contain {count} values")
+        return [float(p) for p in parts]
+
+    @classmethod
+    def _format_numeric_list(cls, values):
         return ",".join(cls._format_float_game(v) for v in values)
 
     def _clear_properties(self):
@@ -563,6 +578,50 @@ class MainFrame(wx.Frame):
         self._property_sizer.Add(panel, 0, wx.EXPAND | wx.BOTTOM, 6)
         self._property_controls.extend(ctrls)
 
+    def _add_numeric_list_row(self, name, raw, count, label, apply_callback, original=None):
+        panel = wx.Panel(self.properties_panel)
+        outer = wx.BoxSizer(wx.HORIZONTAL)
+        name_label = wx.StaticText(panel, label=name, size=(155, -1))
+        outer.Add(name_label, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 8)
+        try:
+            values = self._parse_numeric_list(raw, count, label)
+        except Exception:
+            values = [0.0] * count
+        ctrls = []
+        for idx, value in enumerate(values):
+            axis = str(idx + 1)
+            if count == 4 and label == "color":
+                axis = ("R", "G", "B", "A")[idx]
+            elif count == 16 and label == "matrix":
+                axis = f"M{idx // 4 + 1},{idx % 4 + 1}"
+            c = wx.SpinCtrlDouble(panel, min=-1e12, max=1e12, inc=0.01, size=(96, -1))
+            c.SetDigits(6)
+            c.SetValue(value)
+            c.SetToolTip(f"{name} — {axis}")
+            outer.Add(c, 0, wx.RIGHT, 5)
+            ctrls.append(c)
+
+        def changed(evt):
+            try:
+                apply_callback(self._format_numeric_list([c.GetValue() for c in ctrls]))
+            except Exception:
+                pass
+            evt.Skip()
+
+        for c in ctrls:
+            c.Bind(wx.EVT_SPINCTRLDOUBLE, changed)
+
+        original_label = wx.StaticText(panel, label=f"Original: {original if original is not None else raw}")
+        original_label.SetForegroundColour(wx.Colour(120, 120, 120))
+        original_label.SetToolTip("Original value loaded from the file.")
+        outer.Add(original_label, 0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 8)
+
+        panel.SetSizer(outer)
+        panel.SetMinSize((850, -1))
+        panel._original_label = original_label
+        self._property_sizer.Add(panel, 0, wx.EXPAND | wx.BOTTOM, 6)
+        self._property_controls.extend(ctrls)
+
     def _original_value(self, elem, name, current):
         originals = getattr(elem, "_bxml_originals", None)
         if originals is not None:
@@ -604,7 +663,23 @@ class MainFrame(wx.Frame):
 
             if elem.attrib:
                 for name, value in elem.attrib.items():
-                    if value.startswith("_vector3:"):
+                    if value.startswith("_color:"):
+                        original_value = self._get_original_attr(elem, name, value)
+                        original_body = original_value[7:] if original_value.startswith("_color:") else value[7:]
+                        self._add_numeric_list_row(
+                            name, value[7:], 4, "color",
+                            lambda v, n=name: self._set_attribute_typed(n, "_color:" + v),
+                            original_body
+                        )
+                    elif value.startswith("_matrix:"):
+                        original_value = self._get_original_attr(elem, name, value)
+                        original_body = original_value[8:] if original_value.startswith("_matrix:") else value[8:]
+                        self._add_numeric_list_row(
+                            name, value[8:], 16, "matrix",
+                            lambda v, n=name: self._set_attribute_typed(n, "_matrix:" + v),
+                            original_body
+                        )
+                    elif value.startswith("_vector3:"):
                         self._add_vector3_row(
                             name, value[9:],
                             lambda v, n=name: self._set_attribute_typed(n, "_vector3:" + v),
@@ -816,7 +891,7 @@ class MainFrame(wx.Frame):
     def on_about(self, evt):
         wx.MessageBox(
             "Reflex BXML Editor\n\n"
-            "An editor for game files with a BXML structure.\n\nVersion: 1.0.0\nAuthor: Daniil Korochansky\nLicense: GNU General Public License v3.0",
+            "An editor for game files with a BXML structure.\n\nVersion: 1.1.0\nAuthor: Daniil Korochansky\nLicense: GNU General Public License v3.0",
             "About",
             wx.OK | wx.ICON_INFORMATION
         )
