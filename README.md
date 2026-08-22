@@ -18,6 +18,11 @@ It allows you to edit `.bxml`, `.database`, `.level` and `savegame.bxml` files a
 + Edit Raw XML
 + Save XML
 
+## Installation
+1. Download the latest release.
+2. Unzip the archive containing the executable file to any location.
+3. Run `Reflex BXML Editor.exe`.
+
 ## Quick Start
 
 ### 1. Open the file
